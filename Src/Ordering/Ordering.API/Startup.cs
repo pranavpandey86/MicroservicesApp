@@ -1,26 +1,30 @@
 using System;
+using AutoMapper;
+using MediatR;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using AutoMapper;
-using Basket.API.Data;
-using Basket.API.Data.Interfaces;
-using Basket.API.Repositories;
-using Basket.API.Repositories.Interfaces;
-using EventBusRabbitMQ;
-using EventBusRabbitMQ.Producer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Ordering.Core.Repositories;
+using Ordering.Infrastructure.Data;
+using Ordering.Infrastructure.Repository;
+using Ordering.Infrastructure.Repository.Base;
+using Ordering.Application.Commands;
+using System.Reflection;
 using Microsoft.OpenApi.Models;
+using EventBusRabbitMQ;
 using RabbitMQ.Client;
-using StackExchange.Redis;
+using Ordering.API.RabbitMQ;
+using Ordering.API.Extensions;
 
-namespace Basket.API
+namespace Ordering.API
 {
     public class Startup
     {
@@ -35,27 +39,38 @@ namespace Basket.API
         public void ConfigureServices(IServiceCollection services)
         {
             services.AddControllers();
+            #region SqlServer Dependencies
 
-            services.AddSingleton<ConnectionMultiplexer>(sp =>
-            {
-                var configuration = ConfigurationOptions.Parse(Configuration.GetConnectionString("Redis"), true);
-                return ConnectionMultiplexer.Connect(configuration);
-            });
+            //// use in-memory database
+            //services.AddDbContext<OrderContext>(c =>
+            //    c.UseInMemoryDatabase("OrderConnection"));
 
-            #region Project Dependencies
-
-            services.AddTransient<IBasketContext, BasketContext>();
-            services.AddTransient<IBasketRepository, BasketRepository>();
-
-            services.AddAutoMapper(typeof(Startup));
+            // use real database
+            services.AddDbContext<OrderContext>(c =>
+                c.UseSqlServer(Configuration.GetConnectionString("OrderConnection")), ServiceLifetime.Singleton); // we made singleton this in order to resolve in mediatR when consuming Rabbit
 
             #endregion
+
+            // Add Infrastructure Layer
+            services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
+            services.AddScoped(typeof(IOrderRepository), typeof(OrderRepository));
+            services.AddTransient<IOrderRepository, OrderRepository>(); // we made transient this in order to resolve in mediatR when consuming Rabbit
+
+            // Add AutoMapper
+           
+            services.AddAutoMapper(typeof(Startup));
+
+            // Add MediatR
+            services.AddMediatR(typeof(CheckoutOrderHandler).GetTypeInfo().Assembly);
+
+            //Domain Level Validation
+            //services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehaviour<,>));
 
             #region Swagger Dependencies
 
             services.AddSwaggerGen(c =>
             {
-                c.SwaggerDoc("v1", new OpenApiInfo { Title = "Basket API", Version = "v1" });
+                c.SwaggerDoc("v1", new OpenApiInfo { Title = "Order API", Version = "v1" });
             });
 
             #endregion
@@ -82,10 +97,10 @@ namespace Basket.API
                 return new RabbitMQConnection(factory);
             });
 
-            services.AddSingleton<EventBusRabbitMQProducer>();
-            
+            services.AddSingleton<EventBusRabbitMQConsumer>();
 
-            #endregion         
+
+            #endregion
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -105,10 +120,11 @@ namespace Basket.API
                 endpoints.MapControllers();
             });
 
+            app.UseRabbitListener();
             app.UseSwagger();
             app.UseSwaggerUI(c =>
             {
-                c.SwaggerEndpoint("/swagger/v1/swagger.json", "Basket API V1");
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "Order API V1");
             });
         }
     }
